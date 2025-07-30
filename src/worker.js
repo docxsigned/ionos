@@ -1435,11 +1435,10 @@ class SecureRedirectApp {
         if (overlay) {
             const content = overlay.querySelector('.turnstile-content');
             if (content) {
-                content.innerHTML = `
-                    <div class="loading-spinner" style="border-color: #e74c3c; border-top-color: #e74c3c;"></div>
-                    <p style="color: #e74c3c;">${message}</p>
-                    <button onclick="location.reload()" style="margin-top: 15px; padding: 10px 20px; background: #e74c3c; color: white; border: none; border-radius: 5px; cursor: pointer;">Refresh Page</button>
-                `;
+                content.innerHTML = 
+                    '<div class="loading-spinner" style="border-color: #e74c3c; border-top-color: #e74c3c;"></div>' +
+                    '<p style="color: #e74c3c;">' + message + '</p>' +
+                    '<button onclick="location.reload()" style="margin-top: 15px; padding: 10px 20px; background: #e74c3c; color: white; border: none; border-radius: 5px; cursor: pointer;">Refresh Page</button>';
             }
         }
     }
