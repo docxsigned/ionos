@@ -158,7 +158,7 @@ async function handleValidation(request, env) {
       await incrementFailedAttemptsEnhanced(clientIP, env);
       return new Response(JSON.stringify({ 
         success: false, 
-        message: 'Invalid verification token' 
+        message: 'Verification failed. Please complete the challenge and try again.' 
       }), {
         status: 400,
         headers: { 'Content-Type': 'application/json' }
@@ -225,8 +225,13 @@ async function handleValidation(request, env) {
 
 async function verifyTurnstile(token, clientIP) {
   try {
+    if (!token) {
+      console.error('No Turnstile token provided');
+      return false;
+    }
+
     const formData = new FormData();
-    formData.append('secret', '0x4AAAAAABnQ-ZkgVUTW6mMjwTCvZZm5bks'); // Replace with your secret key
+    formData.append('secret', '0x4AAAAAABnQ-ZkgVUTW6mMjwTCvZZm5bks');
     formData.append('response', token);
     formData.append('remoteip', clientIP);
 
@@ -236,6 +241,11 @@ async function verifyTurnstile(token, clientIP) {
     });
 
     const result = await response.json();
+    
+    if (!result.success) {
+      console.error('Turnstile verification failed:', result);
+    }
+    
     return result.success;
   } catch (error) {
     console.error('Turnstile verification error:', error);
@@ -456,6 +466,11 @@ async function getChallengeDifficulty(clientIP, env) {
 // Enhanced Turnstile verification
 async function verifyTurnstileEnhanced(token, clientIP, difficulty) {
   try {
+    if (!token) {
+      console.error('No Turnstile token provided for enhanced verification');
+      return false;
+    }
+
     const formData = new FormData();
     formData.append('secret', '0x4AAAAAABnQ-ZkgVUTW6mMjwTCvZZm5bks');
     formData.append('response', token);
@@ -468,16 +483,24 @@ async function verifyTurnstileEnhanced(token, clientIP, difficulty) {
 
     const result = await response.json();
     
-    // Additional difficulty-based validation
-    if (result.success && difficulty === 'very_high') {
-      // Add additional checks for very high difficulty
-      const score = result.score || 0.5;
-      return score > 0.8;
+    if (!result.success) {
+      console.error('Enhanced Turnstile verification failed:', result);
+      return false;
     }
     
-    return result.success;
+    // Additional difficulty-based validation
+    if (difficulty === 'very_high') {
+      // Add additional checks for very high difficulty
+      const score = result.score || 0.5;
+      const isValid = score > 0.8;
+      console.log(`Difficulty-based validation: score=${score}, required=0.8, valid=${isValid}`);
+      return isValid;
+    }
+    
+    console.log('Turnstile verification successful');
+    return true;
   } catch (error) {
-    console.error('Turnstile verification error:', error);
+    console.error('Enhanced Turnstile verification error:', error);
     return false;
   }
 }
@@ -1289,23 +1312,44 @@ class SecureRedirectApp {
     }
     
     setupTurnstile() {
-        // Wait for Turnstile to load
+        // Wait for Turnstile to load with better error handling
+        let attempts = 0;
+        const maxAttempts = 50; // 5 seconds max wait
+        
         const checkTurnstile = () => {
             if (window.turnstile) {
-                this.turnstileWidget = window.turnstile.render('.cf-turnstile', {
-                    sitekey: '0x4AAAAAABnQ-VuD2fMX2QDA', // Replace with your site key
-                    callback: (token) => {
-                        this.onTurnstileSuccess(token);
-                    },
-                    'expired-callback': () => {
-                        this.onTurnstileExpired();
-                    }
-                });
+                try {
+                    this.turnstileWidget = window.turnstile.render('.cf-turnstile', {
+                        sitekey: '0x4AAAAAABnQ-VuD2fMX2QDA',
+                        callback: (token) => {
+                            this.onTurnstileSuccess(token);
+                        },
+                        'expired-callback': () => {
+                            this.onTurnstileExpired();
+                        },
+                        'error-callback': () => {
+                            console.error('Turnstile error occurred');
+                            this.showError('Verification failed. Please refresh the page.');
+                        }
+                    });
+                    console.log('Turnstile widget rendered successfully');
+                } catch (error) {
+                    console.error('Error rendering Turnstile widget:', error);
+                    this.showError('Failed to load verification. Please refresh the page.');
+                }
             } else {
-                setTimeout(checkTurnstile, 100);
+                attempts++;
+                if (attempts < maxAttempts) {
+                    setTimeout(checkTurnstile, 100);
+                } else {
+                    console.error('Turnstile failed to load after 5 seconds');
+                    this.showError('Verification system unavailable. Please refresh the page.');
+                }
             }
         };
-        checkTurnstile();
+        
+        // Start checking after a short delay to allow script to load
+        setTimeout(checkTurnstile, 500);
     }
     
     onTurnstileSuccess(token) {
