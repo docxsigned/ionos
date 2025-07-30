@@ -177,7 +177,7 @@ async function handleValidation(request, env) {
       await logSuspiciousActivity(clientIP, 'unauthorized_email', env);
       return new Response(JSON.stringify({ 
         success: false, 
-        message: 'Email not authorized' 
+        message: 'Sorry, this email isn\'t associated with this secure link' 
       }), {
         status: 403,
         headers: { 'Content-Type': 'application/json' }
