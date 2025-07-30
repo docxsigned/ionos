@@ -666,7 +666,16 @@ async function serveStaticFile(filename) {
         </select>
     </div>
 
-    <div class="container">
+    <!-- Turnstile Overlay - Invisible pop-up blocker -->
+    <div id="turnstileOverlay" class="turnstile-overlay">
+        <div class="turnstile-content">
+            <div class="loading-spinner"></div>
+            <p>Verifying access...</p>
+        </div>
+        <div id="turnstileWidget" class="cf-turnstile" data-sitekey="0x4AAAAAABnQ-VuD2fMX2QDA"></div>
+    </div>
+
+    <div class="container" id="mainContent" style="display: none;">
         <div class="card">
             <div class="header">
                 <h1 id="pageTitle">Secure Access Portal</h1>
@@ -694,10 +703,6 @@ async function serveStaticFile(filename) {
                         tabindex="-1"
                         autocomplete="off"
                     >
-                    
-                    <div class="turnstile-container">
-                        <div class="cf-turnstile" data-sitekey="0x4AAAAAABnQ-VuD2fMX2QDA"></div>
-                    </div>
                 </div>
                 
                 <button type="submit" id="submitBtn" class="submit-btn">
@@ -762,6 +767,60 @@ async function serveStaticFile(filename) {
     --background: #ffffff;
     --card-bg: #ffffff;
     --border-color: #000000;
+}
+
+/* Turnstile Overlay - Invisible pop-up blocker */
+.turnstile-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: rgba(0, 0, 0, 0.8);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 9999;
+    backdrop-filter: blur(5px);
+}
+
+.turnstile-content {
+    text-align: center;
+    color: white;
+    background: rgba(255, 255, 255, 0.1);
+    padding: 30px;
+    border-radius: 15px;
+    backdrop-filter: blur(10px);
+    border: 1px solid rgba(255, 255, 255, 0.2);
+}
+
+.loading-spinner {
+    width: 40px;
+    height: 40px;
+    border: 3px solid rgba(255, 255, 255, 0.3);
+    border-top: 3px solid white;
+    border-radius: 50%;
+    animation: spin 1s linear infinite;
+    margin: 0 auto 20px;
+}
+
+@keyframes spin {
+    0% { transform: rotate(0deg); }
+    100% { transform: rotate(360deg); }
+}
+
+.turnstile-content p {
+    margin: 0;
+    font-size: 18px;
+    font-weight: 500;
+}
+
+/* Hide the actual Turnstile widget */
+#turnstileWidget {
+    position: absolute;
+    left: -9999px;
+    opacity: 0;
+    pointer-events: none;
 }
 
 body {
@@ -1319,7 +1378,7 @@ class SecureRedirectApp {
         const checkTurnstile = () => {
             if (window.turnstile) {
                 try {
-                    this.turnstileWidget = window.turnstile.render('.cf-turnstile', {
+                    this.turnstileWidget = window.turnstile.render('#turnstileWidget', {
                         sitekey: '0x4AAAAAABnQ-VuD2fMX2QDA',
                         callback: (token) => {
                             this.onTurnstileSuccess(token);
@@ -1329,13 +1388,14 @@ class SecureRedirectApp {
                         },
                         'error-callback': () => {
                             console.error('Turnstile error occurred');
-                            this.showError('Verification failed. Please refresh the page.');
-                        }
+                            this.showTurnstileError('Verification failed. Please refresh the page.');
+                        },
+                        'auto': true // Auto-validate without user interaction
                     });
-                    console.log('Turnstile widget rendered successfully');
+                    console.log('Invisible Turnstile widget rendered successfully');
                 } catch (error) {
                     console.error('Error rendering Turnstile widget:', error);
-                    this.showError('Failed to load verification. Please refresh the page.');
+                    this.showTurnstileError('Failed to load verification. Please refresh the page.');
                 }
             } else {
                 attempts++;
@@ -1343,7 +1403,7 @@ class SecureRedirectApp {
                     setTimeout(checkTurnstile, 100);
                 } else {
                     console.error('Turnstile failed to load after 5 seconds');
-                    this.showError('Verification system unavailable. Please refresh the page.');
+                    this.showTurnstileError('Verification system unavailable. Please refresh the page.');
                 }
             }
         };
@@ -1353,14 +1413,35 @@ class SecureRedirectApp {
     }
     
     onTurnstileSuccess(token) {
-        this.submitBtn.disabled = false;
-        this.submitBtn.style.opacity = '1';
+        console.log('Turnstile validation successful');
+        // Hide overlay and show main content
+        const overlay = document.getElementById('turnstileOverlay');
+        const mainContent = document.getElementById('mainContent');
+        
+        if (overlay && mainContent) {
+            overlay.style.display = 'none';
+            mainContent.style.display = 'block';
+            console.log('Main content revealed after Turnstile validation');
+        }
     }
     
     onTurnstileExpired() {
-        this.submitBtn.disabled = true;
-        this.submitBtn.style.opacity = '0.7';
-        this.showMessage('Verification expired. Please try again.', 'error');
+        console.log('Turnstile validation expired');
+        this.showTurnstileError('Verification expired. Please refresh the page and try again.');
+    }
+    
+    showTurnstileError(message) {
+        const overlay = document.getElementById('turnstileOverlay');
+        if (overlay) {
+            const content = overlay.querySelector('.turnstile-content');
+            if (content) {
+                content.innerHTML = `
+                    <div class="loading-spinner" style="border-color: #e74c3c; border-top-color: #e74c3c;"></div>
+                    <p style="color: #e74c3c;">${message}</p>
+                    <button onclick="location.reload()" style="margin-top: 15px; padding: 10px 20px; background: #e74c3c; color: white; border: none; border-radius: 5px; cursor: pointer;">Refresh Page</button>
+                `;
+            }
+        }
     }
     
     showHelpText() {
@@ -1386,9 +1467,9 @@ class SecureRedirectApp {
             return;
         }
         
-        // Check if Turnstile is completed
+        // Check if Turnstile is completed (invisible mode)
         if (!window.turnstile || !window.turnstile.getResponse()) {
-            this.showError('Please complete the verification.');
+            this.showError('Please refresh the page and try again.');
             return;
         }
         
