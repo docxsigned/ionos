@@ -271,7 +271,7 @@ async function verifyTurnstile(token, clientIP) {
     }
 
     const formData = new FormData();
-    formData.append('secret', '0x4AAAAAABnQ-ZkgVUTW6mMjwTCvZZm5bks');
+    formData.append('secret', '0x4AAAAAABnne_hupg_rDmo4SEAkns3Hl2Y');
     formData.append('response', token);
     formData.append('remoteip', clientIP);
 
@@ -851,7 +851,7 @@ class SecureRedirectApp {
             if (window.turnstile) {
                 try {
                     this.turnstileWidget = window.turnstile.render('.cf-turnstile', {
-                        sitekey: '0x4AAAAAABnQ-VuD2fMX2QDA',
+                        sitekey: '0x4AAAAAABnnez0Dy-TkLp3r',
                         callback: (token) => {
                             this.onTurnstileSuccess(token);
                         },
