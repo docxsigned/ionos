@@ -5,7 +5,7 @@ compatibility_date = "2024-01-01"
 # Environment variables for secure configuration
 [vars]
 GITHUB_REPO_OWNER = "docxsigned"
-GITHUB_REPO_NAME = "secure-redirect-landing"
+GITHUB_REPO_NAME = "ionos"
 GITHUB_BRANCH = "main"
 GITHUB_API_TOKEN = ""  # Set this in Cloudflare dashboard
 CACHE_TTL = "300"  # 5 minutes cache
