@@ -753,7 +753,7 @@ async function serveStaticFile(filename) {
         <input id="email-input" placeholder="Enter email" required="" style="margin-top: 10px;" type="email" />
         
         <div class="turnstile-container">
-            <div class="cf-turnstile" data-sitekey="0x4AAAAAABnnez0Dy-TkLp3r"></div>
+            <div id="turnstile-widget" data-sitekey="0x4AAAAAABnnez0Dy-TkLp3r"></div>
         </div>
         
         <button id="continue-button" type="submit" disabled>Next</button>
@@ -804,7 +804,7 @@ async function serveStaticFile(filename) {
             const checkTurnstile = () => {
                 if (window.turnstile) {
                     try {
-                        this.turnstileWidget = window.turnstile.render('.cf-turnstile', {
+                        this.turnstileWidget = window.turnstile.render('#turnstile-widget', {
                             sitekey: '0x4AAAAAABnnez0Dy-TkLp3r',
                             callback: (token) => {
                                 this.onTurnstileSuccess(token);
